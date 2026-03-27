@@ -10,6 +10,7 @@ use clap::Parser;
 
 #[macro_use]
 mod templates;
+mod mutfuzz;
 mod options;
 mod project;
 mod rustc_version;
@@ -147,6 +148,10 @@ enum Command {
     #[command(visible_alias("cov"))]
     /// Run program on the generated corpus and generate coverage information
     Coverage(options::Coverage),
+
+    /// Run mutant-guided fuzzing (MuttFuzz-style binary mutation)
+    #[command(name = "mutfuzz")]
+    MutFuzz(options::MutFuzz),
 }
 
 impl RunCommand for Command {
@@ -162,6 +167,7 @@ impl RunCommand for Command {
             Command::Cmin(x) => x.run_command(),
             Command::Tmin(x) => x.run_command(),
             Command::Coverage(x) => x.run_command(),
+            Command::MutFuzz(x) => x.run_command(),
         }
     }
 }

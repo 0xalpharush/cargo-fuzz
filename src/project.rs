@@ -681,6 +681,34 @@ impl FuzzProject {
         Ok(())
     }
 
+    /// Run mutant-guided fuzzing
+    pub fn exec_mutfuzz(&self, opts: &options::MutFuzz) -> Result<()> {
+        use crate::mutfuzz::orchestrator;
+
+        // Build the fuzz target first
+        self.exec_build(BuildMode::Build, &opts.build, Some(&opts.target))?;
+
+        // Locate the compiled binary
+        let bin_path =
+            orchestrator::get_fuzz_bin_path(self.fuzz_dir(), &opts.build, &opts.target)?;
+
+        // Set up corpus and artifacts directories
+        let corpus_dir = if !opts.corpus.is_empty() {
+            std::path::PathBuf::from(&opts.corpus[0])
+        } else {
+            self.corpus_for(&opts.target)?
+        };
+        let artifacts_dir = self.artifacts_for(&opts.target)?;
+
+        orchestrator::run(
+            self.fuzz_dir(),
+            &artifacts_dir,
+            &corpus_dir,
+            &bin_path,
+            opts,
+        )
+    }
+
     pub fn exec_cmin(&self, cmin: &options::Cmin) -> Result<()> {
         self.exec_build(BuildMode::Build, &cmin.build, Some(&cmin.target))?;
         let mut cmd = self.cargo_run(&cmin.build, &cmin.target)?;

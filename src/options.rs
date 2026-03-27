@@ -6,12 +6,13 @@ mod coverage;
 mod fmt;
 mod init;
 mod list;
+mod mutfuzz;
 mod run;
 mod tmin;
 
 pub use self::{
     add::Add, build::Build, check::Check, cmin::Cmin, coverage::Coverage, fmt::Fmt, init::Init,
-    list::List, run::Run, tmin::Tmin,
+    list::List, mutfuzz::MutFuzz, run::Run, tmin::Tmin,
 };
 
 use anyhow::{bail, Error, Result};

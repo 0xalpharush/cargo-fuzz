@@ -22,6 +22,10 @@ rustc_version = "0.4.0"
 cargo_metadata = "0.18.1"
 rayon = "1.11"
 num_cpus = "1.17"
+rand = "0.8"
+iced-x86 = "1"
+object = { version = "0.36", default-features = false, features = ["read"] }
+rustc-demangle = "0.1"
 
 [dev-dependencies]
 assert_cmd = "2.0.7"

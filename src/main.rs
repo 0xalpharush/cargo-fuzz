@@ -10,6 +10,7 @@ use clap::Parser;
 
 #[macro_use]
 mod templates;
+mod callgraph_shim;
 mod mutfuzz;
 mod options;
 mod project;
@@ -149,6 +150,10 @@ enum Command {
     /// Run program on the generated corpus and generate coverage information
     Coverage(options::Coverage),
 
+    #[command(visible_alias("cg"))]
+    /// Generate a dynamic call graph from corpus replay via trace-pc-guard
+    Callgraph(options::Callgraph),
+
     /// Run mutant-guided fuzzing (MuttFuzz-style binary mutation)
     #[command(name = "mutfuzz")]
     MutFuzz(options::MutFuzz),
@@ -167,6 +172,7 @@ impl RunCommand for Command {
             Command::Cmin(x) => x.run_command(),
             Command::Tmin(x) => x.run_command(),
             Command::Coverage(x) => x.run_command(),
+            Command::Callgraph(x) => x.run_command(),
             Command::MutFuzz(x) => x.run_command(),
         }
     }

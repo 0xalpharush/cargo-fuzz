@@ -3,12 +3,80 @@ pub mod project;
 use self::project::*;
 use assert_cmd::prelude::*;
 use predicates::prelude::*;
+use serde_json::Value;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
 
 fn cargo_fuzz() -> Command {
     Command::cargo_bin("cargo-fuzz").unwrap()
+}
+
+fn edge_map(edges: &Value) -> HashMap<(String, String), u64> {
+    edges
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|edge| {
+            (
+                (
+                    edge.get("caller").unwrap().as_str().unwrap().to_string(),
+                    edge.get("callee").unwrap().as_str().unwrap().to_string(),
+                ),
+                edge.get("count").unwrap().as_u64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+fn function_set(functions: &Value) -> BTreeSet<String> {
+    functions
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|func| {
+            func.get("name")
+                .unwrap_or(func)
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect()
+}
+
+fn interned_function_map(root: &Value) -> HashMap<u64, String> {
+    root.get("functions")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|func| {
+            (
+                func.get("id").unwrap().as_u64().unwrap(),
+                func.get("name").unwrap().as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+fn interned_function_set(
+    function_ids: &Value,
+    functions_by_id: &HashMap<u64, String>,
+) -> BTreeSet<String> {
+    function_ids
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|func_id| functions_by_id[&func_id.as_u64().unwrap()].clone())
+        .collect()
+}
+
+fn suffix_set(values: &BTreeSet<String>) -> BTreeSet<String> {
+    values
+        .iter()
+        .map(|value| value.rsplit("::").next().unwrap_or(value).to_string())
+        .collect()
 }
 
 #[test]
@@ -380,6 +448,382 @@ fn run_with_coverage() {
 
     let profdata_file = project.fuzz_coverage_dir(target).join("coverage.profdata");
     assert!(profdata_file.exists(), "Coverage data file not generated");
+}
+
+#[test]
+fn run_with_callgraph() {
+    let target = "cg_target";
+    let corpus = Path::new("fuzz").join("corpus").join(target);
+
+    let project = project("run_with_callgraph")
+        .file(
+            "src/lib.rs",
+            r#"
+                #[inline(never)]
+                pub fn stage1(data: &[u8]) -> usize {
+                    let s = String::from_utf8_lossy(data);
+                    stage2(&s)
+                }
+
+                #[inline(never)]
+                pub fn stage2(s: &str) -> usize {
+                    if s.contains('z') {
+                        branch_z(s)
+                    } else {
+                        branch_other(s)
+                    }
+                }
+
+                #[inline(never)]
+                pub fn branch_z(s: &str) -> usize {
+                    helper_len(s) + helper_first(s)
+                }
+
+                #[inline(never)]
+                pub fn branch_other(s: &str) -> usize {
+                    helper_len(s)
+                }
+
+                #[inline(never)]
+                pub fn helper_len(s: &str) -> usize {
+                    s.len()
+                }
+
+                #[inline(never)]
+                pub fn helper_first(s: &str) -> usize {
+                    s.as_bytes().first().copied().unwrap_or(0) as usize
+                }
+            "#,
+        )
+        .with_fuzz()
+        .fuzz_target(
+            target,
+            r#"
+                #![no_main]
+                use run_with_callgraph::stage1;
+                use libfuzzer_sys::fuzz_target;
+
+                fuzz_target!(|data: &[u8]| {
+                    let _ = stage1(data);
+                });
+            "#,
+        )
+        // Pre-populate corpus so callgraph has seeds to replay
+        .file(corpus.join("seed-0"), "hello")
+        .file(corpus.join("seed-1"), "fuzz")
+        .file(corpus.join("seed-2"), "zero")
+        .build();
+
+    // Generate the call graph from pre-populated corpus
+    project
+        .cargo_fuzz()
+        .arg("callgraph")
+        .arg(target)
+        .arg("--partitions")
+        .arg("2")
+        .assert()
+        .success();
+
+    let dot_file = project
+        .fuzz_dir()
+        .join("callgraph")
+        .join(target)
+        .join("callgraph.dot");
+    assert!(
+        dot_file.exists(),
+        "Call graph DOT file not generated at {:?}",
+        dot_file
+    );
+    let json_file = project
+        .fuzz_dir()
+        .join("callgraph")
+        .join(target)
+        .join("callgraph.json");
+    assert!(
+        json_file.exists(),
+        "Call graph JSON file not generated at {:?}",
+        json_file
+    );
+    let seed_hits_file = project
+        .fuzz_dir()
+        .join("callgraph")
+        .join(target)
+        .join("seed_hits.json");
+    assert!(
+        seed_hits_file.exists(),
+        "Seed hits JSON file not generated at {:?}",
+        seed_hits_file
+    );
+    let partition_dir = project
+        .fuzz_dir()
+        .join("callgraph")
+        .join(target)
+        .join("partitions");
+    let partitions_json = partition_dir.join("partitions.json");
+    assert!(
+        partitions_json.exists(),
+        "Partition summary file not generated at {:?}",
+        partitions_json
+    );
+    let task_1 = partition_dir.join("task_1.txt");
+    let task_2 = partition_dir.join("task_2.txt");
+    let task_1_dot = partition_dir.join("task_1.dot");
+    let task_2_dot = partition_dir.join("task_2.dot");
+    assert!(
+        task_1.exists(),
+        "Partition task file missing at {:?}",
+        task_1
+    );
+    assert!(
+        task_2.exists(),
+        "Partition task file missing at {:?}",
+        task_2
+    );
+    assert!(
+        task_1_dot.exists(),
+        "Partition DOT file missing at {:?}",
+        task_1_dot
+    );
+    assert!(
+        task_2_dot.exists(),
+        "Partition DOT file missing at {:?}",
+        task_2_dot
+    );
+
+    let dot_content = fs::read_to_string(&dot_file).unwrap();
+    assert!(dot_content.starts_with("digraph callgraph {\n"));
+
+    let callgraph_json: Value =
+        serde_json::from_str(&fs::read_to_string(&json_file).unwrap()).unwrap();
+    let nodes = function_set(callgraph_json.get("nodes").unwrap());
+    let edges = edge_map(callgraph_json.get("edges").unwrap());
+
+    // Function names are fully qualified with crate path (via rustc-demangle {:#})
+    let expected_nodes: BTreeSet<String> = [
+        "run_with_callgraph::branch_other",
+        "run_with_callgraph::branch_z",
+        "run_with_callgraph::helper_first",
+        "run_with_callgraph::helper_len",
+        "run_with_callgraph::stage1",
+        "run_with_callgraph::stage2",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    assert!(
+        expected_nodes.is_subset(&nodes),
+        "missing target nodes: {:?}\nall nodes: {:?}",
+        expected_nodes.difference(&nodes).collect::<Vec<_>>(),
+        nodes
+    );
+
+    let p = "run_with_callgraph::";
+
+    // Check direct edges between our domain functions. The call chain is:
+    //   stage1 -> stage2 -> (branch_z | branch_other) -> helper_len
+    // There may be intermediate std functions (e.g. memchr) between stage2 and
+    // branch_*, so we check the edges we know are direct calls.
+    assert_eq!(
+        edges
+            .get(&(format!("{p}stage1"), format!("{p}stage2")))
+            .copied(),
+        Some(3),
+        "wrong edge count for stage1 -> stage2"
+    );
+    assert_eq!(
+        edges
+            .get(&(format!("{p}branch_z"), format!("{p}helper_len")))
+            .copied(),
+        Some(2),
+        "wrong edge count for branch_z -> helper_len"
+    );
+    assert_eq!(
+        edges
+            .get(&(format!("{p}branch_other"), format!("{p}helper_len")))
+            .copied(),
+        Some(1),
+        "wrong edge count for branch_other -> helper_len"
+    );
+
+    for node in callgraph_json.get("nodes").unwrap().as_array().unwrap() {
+        let name = node.get("name").unwrap().as_str().unwrap();
+        if expected_nodes.contains(name) {
+            assert!(
+                node.get("region_total").unwrap().as_u64().unwrap() > 0,
+                "expected coverage for node {name}: {node:?}"
+            );
+        }
+    }
+
+    let seed_hits_json: Value =
+        serde_json::from_str(&fs::read_to_string(&seed_hits_file).unwrap()).unwrap();
+    let seeds = seed_hits_json.get("seeds").unwrap().as_array().unwrap();
+    assert_eq!(seeds.len(), 3);
+    let functions_by_id = interned_function_map(&seed_hits_json);
+
+    let seed_hits: HashMap<String, BTreeSet<String>> = seeds
+        .iter()
+        .map(|seed| {
+            (
+                Path::new(seed.get("seed").unwrap().as_str().unwrap())
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string(),
+                interned_function_set(seed.get("function_ids").unwrap(), &functions_by_id),
+            )
+        })
+        .collect();
+
+    // Check that each seed hits the expected domain functions (using full paths).
+    // seed-0 hits branch_other (not branch_z), seed-1/seed-2 hit branch_z.
+    let seed0 = seed_hits.get("seed-0").unwrap();
+    let seed1 = seed_hits.get("seed-1").unwrap();
+    let seed2 = seed_hits.get("seed-2").unwrap();
+
+    // All seeds traverse the common shared trunk
+    for seed in [seed0, seed1, seed2] {
+        assert!(
+            seed.iter().any(|f| f.ends_with("::stage1")),
+            "missing stage1 in {seed:?}"
+        );
+        assert!(
+            seed.iter().any(|f| f.ends_with("::stage2")),
+            "missing stage2 in {seed:?}"
+        );
+    }
+
+    // seed-0 ("hello") has no 'z', so it hits branch_other
+    assert!(seed0.iter().any(|f| f.ends_with("::branch_other")));
+    assert!(!seed0.iter().any(|f| f.ends_with("::branch_z")));
+
+    // seed-1 ("fuzz") and seed-2 ("zero") contain 'z', so they hit branch_z
+    assert!(seed1.iter().any(|f| f.ends_with("::branch_z")));
+    assert!(seed2.iter().any(|f| f.ends_with("::branch_z")));
+    assert!(!seed1.iter().any(|f| f.ends_with("::branch_other")));
+    assert!(!seed2.iter().any(|f| f.ends_with("::branch_other")));
+
+    let partitions: Value =
+        serde_json::from_str(&fs::read_to_string(&partitions_json).unwrap()).unwrap();
+    assert_eq!(partitions.get("partitioner").unwrap().as_str(), Some("ldg"));
+    let shared_functions = interned_function_set(
+        partitions.get("shared_function_ids").unwrap(),
+        &interned_function_map(&partitions),
+    );
+    assert_eq!(
+        suffix_set(&shared_functions),
+        BTreeSet::from([
+            String::from("helper_len"),
+            String::from("stage1"),
+            String::from("stage2"),
+        ])
+    );
+
+    let partition_entries = partitions.get("partitions").unwrap().as_array().unwrap();
+    assert_eq!(partition_entries.len(), 2);
+    let partition_functions_by_id = interned_function_map(&partitions);
+
+    let actual_partitions: BTreeSet<(BTreeSet<String>, BTreeSet<String>, BTreeSet<String>)> =
+        partition_entries
+            .iter()
+            .map(|partition| {
+                let functions = function_set(partition.get("partition_functions").unwrap());
+                let task_functions = interned_function_set(
+                    partition.get("task_function_ids").unwrap(),
+                    &partition_functions_by_id,
+                );
+                let seeds = partition
+                    .get("seeds")
+                    .unwrap()
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|seed| {
+                        Path::new(seed.as_str().unwrap())
+                            .file_name()
+                            .unwrap()
+                            .to_string_lossy()
+                            .to_string()
+                    })
+                    .collect();
+                (functions, task_functions, seeds)
+            })
+            .collect();
+
+    assert_eq!(actual_partitions.len(), 2, "expected 2 partitions");
+
+    // With shared filtering, only branch-specific functions remain owned.
+    let all_owned: BTreeSet<String> = actual_partitions
+        .iter()
+        .flat_map(|(owned, _, _)| owned.iter().cloned())
+        .collect();
+    assert_eq!(
+        suffix_set(&all_owned),
+        BTreeSet::from([
+            String::from("branch_other"),
+            String::from("branch_z"),
+            String::from("helper_first"),
+        ])
+    );
+
+    // All 3 seeds are assigned (no empty partitions since we skip those)
+    let all_seeds: BTreeSet<String> = actual_partitions
+        .iter()
+        .flat_map(|(_, _, seeds)| seeds.iter().cloned())
+        .collect();
+    assert_eq!(
+        all_seeds,
+        BTreeSet::from([
+            String::from("seed-0"),
+            String::from("seed-1"),
+            String::from("seed-2"),
+        ])
+    );
+
+    // Task files contain the branch-specific owned set plus the replicated shared context.
+    let task_files: BTreeSet<BTreeSet<String>> = [task_1, task_2]
+        .into_iter()
+        .map(|path| {
+            fs::read_to_string(path)
+                .unwrap()
+                .lines()
+                .map(|line| {
+                    let (source, func) = line.split_once(':').unwrap();
+                    format!("{}:{}", source, func.rsplit("::").next().unwrap_or(func))
+                })
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        task_files,
+        BTreeSet::from([
+            BTreeSet::from([
+                String::from("src/lib.rs:branch_other"),
+                String::from("src/lib.rs:helper_len"),
+                String::from("src/lib.rs:stage1"),
+                String::from("src/lib.rs:stage2"),
+            ]),
+            BTreeSet::from([
+                String::from("src/lib.rs:branch_z"),
+                String::from("src/lib.rs:helper_first"),
+                String::from("src/lib.rs:helper_len"),
+                String::from("src/lib.rs:stage1"),
+                String::from("src/lib.rs:stage2"),
+            ]),
+        ])
+    );
+    assert!(fs::read_to_string(&task_1_dot)
+        .unwrap()
+        .starts_with("digraph callgraph {\n"));
+    assert!(fs::read_to_string(&task_2_dot)
+        .unwrap()
+        .starts_with("digraph callgraph {\n"));
+    assert!(fs::read_to_string(&task_1_dot)
+        .unwrap()
+        .contains("run_with_callgraph::branch"));
+    assert!(fs::read_to_string(&task_2_dot)
+        .unwrap()
+        .contains("run_with_callgraph::branch"));
 }
 
 #[test]

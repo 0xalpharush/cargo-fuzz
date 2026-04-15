@@ -1,5 +1,6 @@
 mod add;
 mod build;
+mod callgraph;
 mod check;
 mod cmin;
 mod coverage;
@@ -11,8 +12,18 @@ mod run;
 mod tmin;
 
 pub use self::{
-    add::Add, build::Build, check::Check, cmin::Cmin, coverage::Coverage, fmt::Fmt, init::Init,
-    list::List, mutfuzz::MutFuzz, run::Run, tmin::Tmin,
+    add::Add,
+    build::Build,
+    callgraph::{Callgraph, Partitioner},
+    check::Check,
+    cmin::Cmin,
+    coverage::Coverage,
+    fmt::Fmt,
+    init::Init,
+    list::List,
+    mutfuzz::MutFuzz,
+    run::Run,
+    tmin::Tmin,
 };
 
 use anyhow::{bail, Error, Result};
